@@ -27,7 +27,7 @@ const clientDistPath = path.resolve(__dirname, "../../client/dist");
 const allowedOrigins = (
   process.env.CORS_ALLOWED_ORIGINS ||
   process.env.CLIENT_URL ||
-  "http://localhost:5173"
+  "https://codesync-arena-frontend-production.up.railway.app"
 )
   .split(",")
   .map((origin) => origin.trim())
