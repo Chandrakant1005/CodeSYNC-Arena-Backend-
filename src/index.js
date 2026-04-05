@@ -24,11 +24,27 @@ const app = express();
 const server = http.createServer(app);
 const clientDistPath = path.resolve(__dirname, "../../client/dist");
 
-const allowedOrigin = process.env.CLIENT_URL || "http://localhost:5173";
+const allowedOrigins = (
+  process.env.CORS_ALLOWED_ORIGINS ||
+  process.env.CLIENT_URL ||
+  "http://localhost:5173"
+)
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+function corsOriginHandler(origin, callback) {
+  if (!origin || allowedOrigins.includes(origin)) {
+    callback(null, true);
+    return;
+  }
+
+  callback(new Error(`Origin ${origin} is not allowed by CORS.`));
+}
 
 app.use(
   cors({
-    origin: allowedOrigin,
+    origin: corsOriginHandler,
     credentials: true
   })
 );
@@ -67,7 +83,7 @@ app.get("*", (req, res, next) => {
 
 const io = new Server(server, {
   cors: {
-    origin: allowedOrigin,
+    origin: corsOriginHandler,
     credentials: true
   }
 });
