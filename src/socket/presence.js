@@ -3,6 +3,7 @@ import pool from "../config/db.js";
 const presenceByMeeting = new Map();
 const socketToPresence = new Map();
 const whiteboardsByMeeting = new Map();
+const codeEditorsByMeeting = new Map();
 
 function getWhiteboard(roomKey) {
   if (!whiteboardsByMeeting.has(roomKey)) {
@@ -16,6 +17,53 @@ function getWhiteboard(roomKey) {
   return whiteboardsByMeeting.get(roomKey);
 }
 
+const defaultCodeEditorContent =
+  `// Welcome to CodeSYNC live editor\n` +
+  `function greet(name) {\n` +
+  `  return \`Hello, \${name}!\`;\n` +
+  `}\n\n` +
+  `console.log(greet("team"));`;
+
+const defaultCodeEditorTestCases = JSON.stringify(
+  [
+    {
+      name: "Greets a single name",
+      input: ["Ada"],
+      expected: "Hello, Ada!"
+    },
+    {
+      name: "Greets another name",
+      input: ["team"],
+      expected: "Hello, team!"
+    }
+  ],
+  null,
+  2
+);
+
+const defaultCodeEditorValidationScript =
+  `return runFunctionTestCases({\n` +
+  `  functionName: "greet",\n` +
+  `  testCases\n` +
+  `});`;
+
+function getCodeEditor(roomKey) {
+  if (!codeEditorsByMeeting.has(roomKey)) {
+    codeEditorsByMeeting.set(roomKey, {
+      visible: false,
+      canGuestsEdit: false,
+      language: "javascript",
+      content: defaultCodeEditorContent,
+      testCases: defaultCodeEditorTestCases,
+      validationScript: defaultCodeEditorValidationScript,
+      updatedAt: new Date().toISOString(),
+      updatedBy: null
+    });
+  }
+
+  return codeEditorsByMeeting.get(roomKey);
+}
+
 function canDraw(presence) {
   if (!presence) {
     return false;
@@ -23,6 +71,15 @@ function canDraw(presence) {
 
   const whiteboard = getWhiteboard(presence.roomKey);
   return presence.user.id === presence.meetingOwnerId || whiteboard.canGuestsDraw;
+}
+
+function canEditCode(presence) {
+  if (!presence) {
+    return false;
+  }
+
+  const codeEditor = getCodeEditor(presence.roomKey);
+  return presence.user.id === presence.meetingOwnerId || codeEditor.canGuestsEdit;
 }
 
 function serializePresenceItem(item) {
@@ -139,6 +196,19 @@ export function registerMeetingSocket(io, socket) {
         ownerId: meeting.owner_id
       });
 
+      const codeEditor = getCodeEditor(roomKey);
+      socket.emit("code-editor:init", {
+        visible: codeEditor.visible,
+        canGuestsEdit: codeEditor.canGuestsEdit,
+        language: codeEditor.language,
+        content: codeEditor.content,
+        testCases: codeEditor.testCases,
+        validationScript: codeEditor.validationScript,
+        updatedAt: codeEditor.updatedAt,
+        updatedBy: codeEditor.updatedBy,
+        ownerId: meeting.owner_id
+      });
+
       socket.to(roomKey).emit("meeting:peer-joined", serializePresenceItem(presence));
 
       io.to(roomKey).emit("meeting:chat", {
@@ -219,6 +289,15 @@ export function registerMeetingSocket(io, socket) {
     const whiteboard = getWhiteboard(presence.roomKey);
     whiteboard.visible = Boolean(visible);
 
+    if (whiteboard.visible) {
+      const codeEditor = getCodeEditor(presence.roomKey);
+      codeEditor.visible = false;
+      io.to(presence.roomKey).emit("code-editor:visibility", {
+        visible: false,
+        ownerId: presence.meetingOwnerId
+      });
+    }
+
     io.to(presence.roomKey).emit("whiteboard:visibility", {
       visible: whiteboard.visible,
       ownerId: presence.meetingOwnerId
@@ -254,10 +333,173 @@ export function registerMeetingSocket(io, socket) {
     const whiteboard = getWhiteboard(presence.roomKey);
     whiteboard.visible = true;
 
+    const codeEditor = getCodeEditor(presence.roomKey);
+    codeEditor.visible = false;
+    io.to(presence.roomKey).emit("code-editor:visibility", {
+      visible: false,
+      ownerId: presence.meetingOwnerId
+    });
+
     io.to(presence.roomKey).emit("whiteboard:visibility", {
       visible: true,
       ownerId: presence.meetingOwnerId,
       approvedRequesterId: requesterId ?? null
+    });
+  });
+
+  socket.on("code-editor:permission", ({ canGuestsEdit }) => {
+    const presence = socketToPresence.get(socket.id);
+    if (!presence || presence.user.id !== presence.meetingOwnerId) {
+      return;
+    }
+
+    const codeEditor = getCodeEditor(presence.roomKey);
+    codeEditor.canGuestsEdit = Boolean(canGuestsEdit);
+
+    io.to(presence.roomKey).emit("code-editor:permission", {
+      canGuestsEdit: codeEditor.canGuestsEdit,
+      ownerId: presence.meetingOwnerId
+    });
+  });
+
+  socket.on("code-editor:toggle-visible", ({ visible }) => {
+    const presence = socketToPresence.get(socket.id);
+    if (!presence || presence.user.id !== presence.meetingOwnerId) {
+      return;
+    }
+
+    const codeEditor = getCodeEditor(presence.roomKey);
+    codeEditor.visible = Boolean(visible);
+
+    if (codeEditor.visible) {
+      const whiteboard = getWhiteboard(presence.roomKey);
+      whiteboard.visible = false;
+      io.to(presence.roomKey).emit("whiteboard:visibility", {
+        visible: false,
+        ownerId: presence.meetingOwnerId
+      });
+    }
+
+    io.to(presence.roomKey).emit("code-editor:visibility", {
+      visible: codeEditor.visible,
+      ownerId: presence.meetingOwnerId
+    });
+  });
+
+  socket.on("code-editor:request-open", () => {
+    const presence = socketToPresence.get(socket.id);
+    if (!presence || presence.user.id === presence.meetingOwnerId) {
+      return;
+    }
+
+    io.to(presence.roomKey).emit("code-editor:request-open", {
+      requester: presence.user,
+      ownerId: presence.meetingOwnerId,
+      createdAt: new Date().toISOString()
+    });
+
+    io.to(presence.roomKey).emit("meeting:ownerPrompt", {
+      type: "code-editor-request",
+      createdAt: new Date().toISOString(),
+      ownerId: presence.meetingOwnerId,
+      member: presence.user
+    });
+  });
+
+  socket.on("code-editor:approve-request", ({ requesterId }) => {
+    const presence = socketToPresence.get(socket.id);
+    if (!presence || presence.user.id !== presence.meetingOwnerId) {
+      return;
+    }
+
+    const codeEditor = getCodeEditor(presence.roomKey);
+    codeEditor.visible = true;
+
+    const whiteboard = getWhiteboard(presence.roomKey);
+    whiteboard.visible = false;
+    io.to(presence.roomKey).emit("whiteboard:visibility", {
+      visible: false,
+      ownerId: presence.meetingOwnerId
+    });
+
+    io.to(presence.roomKey).emit("code-editor:visibility", {
+      visible: true,
+      ownerId: presence.meetingOwnerId,
+      approvedRequesterId: requesterId ?? null
+    });
+  });
+
+  socket.on("code-editor:reset", () => {
+    const presence = socketToPresence.get(socket.id);
+    if (!presence || presence.user.id !== presence.meetingOwnerId) {
+      return;
+    }
+
+    const codeEditor = getCodeEditor(presence.roomKey);
+    codeEditor.language = "javascript";
+    codeEditor.content = defaultCodeEditorContent;
+    codeEditor.testCases = defaultCodeEditorTestCases;
+    codeEditor.validationScript = defaultCodeEditorValidationScript;
+    codeEditor.updatedAt = new Date().toISOString();
+    codeEditor.updatedBy = presence.user.fullName;
+
+    io.to(presence.roomKey).emit("code-editor:update", {
+      language: codeEditor.language,
+      content: codeEditor.content,
+      testCases: codeEditor.testCases,
+      validationScript: codeEditor.validationScript,
+      updatedAt: codeEditor.updatedAt,
+      updatedBy: codeEditor.updatedBy
+    });
+  });
+
+  socket.on("code-editor:update", ({ content, language }) => {
+    const presence = socketToPresence.get(socket.id);
+    if (!canEditCode(presence)) {
+      return;
+    }
+
+    const codeEditor = getCodeEditor(presence.roomKey);
+    codeEditor.content = typeof content === "string" ? content.slice(0, 50000) : codeEditor.content;
+    codeEditor.language =
+      typeof language === "string" && language.trim()
+        ? language.trim().slice(0, 32)
+        : codeEditor.language;
+    codeEditor.updatedAt = new Date().toISOString();
+    codeEditor.updatedBy = presence.user.fullName;
+
+    socket.to(presence.roomKey).emit("code-editor:update", {
+      content: codeEditor.content,
+      language: codeEditor.language,
+      updatedAt: codeEditor.updatedAt,
+      updatedBy: codeEditor.updatedBy
+    });
+  });
+
+  socket.on("code-editor:test-config", ({ testCases, validationScript }) => {
+    const presence = socketToPresence.get(socket.id);
+    if (!presence || presence.user.id !== presence.meetingOwnerId) {
+      return;
+    }
+
+    const codeEditor = getCodeEditor(presence.roomKey);
+
+    if (typeof testCases === "string") {
+      codeEditor.testCases = testCases.slice(0, 20000);
+    }
+
+    if (typeof validationScript === "string") {
+      codeEditor.validationScript = validationScript.slice(0, 20000);
+    }
+
+    codeEditor.updatedAt = new Date().toISOString();
+    codeEditor.updatedBy = presence.user.fullName;
+
+    io.to(presence.roomKey).emit("code-editor:test-config", {
+      testCases: codeEditor.testCases,
+      validationScript: codeEditor.validationScript,
+      updatedAt: codeEditor.updatedAt,
+      updatedBy: codeEditor.updatedBy
     });
   });
 
@@ -340,6 +582,7 @@ export function registerMeetingSocket(io, socket) {
       if (!participants.size) {
         presenceByMeeting.delete(presence.roomKey);
         whiteboardsByMeeting.delete(presence.roomKey);
+        codeEditorsByMeeting.delete(presence.roomKey);
       }
     }
 
@@ -381,6 +624,7 @@ export function registerMeetingSocket(io, socket) {
       if (!participants.size) {
         presenceByMeeting.delete(presence.roomKey);
         whiteboardsByMeeting.delete(presence.roomKey);
+        codeEditorsByMeeting.delete(presence.roomKey);
       }
     }
 
